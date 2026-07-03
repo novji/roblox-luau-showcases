@@ -1,0 +1,211 @@
+--!strict
+
+-- Services
+
+local Players: Players = game:GetService("Players")
+local UserInputService: UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage: ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService: RunService = game:GetService("RunService")
+
+-- Variables
+
+local Remotes: Folder = ReplicatedStorage:WaitForChild("Remotes") :: Folder
+local CombatEvent: RemoteEvent = Remotes:WaitForChild("CombatEvent") :: RemoteEvent
+local HitFeedback: RemoteEvent = Remotes:WaitForChild("HitFeedback") :: RemoteEvent
+
+local LocalPlayer: Player = Players.LocalPlayer
+
+-- Constants
+
+local HitSoundId: string = "rbxassetid://102730477760082"
+local BlockSoundId: string = "rbxassetid://102730477760082"
+local ParrySoundId: string = "rbxassetid://102730477760082"
+
+local InputCooldown: number = 0.12
+
+-- State
+
+local DebugHitbox: boolean = true
+local LastClick: number = 0
+local BlockDown: boolean = false
+
+-- Private Functions
+
+local function play_sound(hrp: BasePart?, sound_id: string, volume: number)
+	if not hrp then
+		return
+	end
+
+	local sound: Sound = Instance.new("Sound")
+	sound.SoundId = sound_id
+	sound.Volume = volume
+	sound.PlayOnRemove = true
+	sound.Parent = hrp
+	sound:Destroy()
+end
+
+local function toggle_debug()
+	DebugHitbox = not DebugHitbox
+end
+
+local function get_limb(model: Model, attack_name: string): BasePart?
+	local left_arm: BasePart? = model:FindFirstChild("Left Arm") :: BasePart?
+	local right_arm: BasePart? = model:FindFirstChild("Right Arm") :: BasePart?
+	local right_leg: BasePart? = model:FindFirstChild("Right Leg") :: BasePart?
+
+	if attack_name == "PunchRight" then
+		return right_arm
+	end
+
+	if attack_name == "PunchLeft" then
+		return left_arm
+	end
+
+	if attack_name == "Kick" then
+		return right_leg
+	end
+
+	return nil
+end
+
+local function show_debug(model: Model?, attack_name: string, size: Vector3, duration: number)
+	if not DebugHitbox then
+		return
+	end
+
+	if not model or not model.Parent then
+		return
+	end
+
+	local limb: BasePart? = get_limb(model, attack_name)
+	if not limb then
+		return
+	end
+
+	local box: Part = Instance.new("Part")
+	box.Name = "HitboxDebug"
+	box.Anchored = true
+	box.CanCollide = false
+	box.CanQuery = false
+	box.CanTouch = false
+	box.Massless = true
+	box.Material = Enum.Material.Glass
+	box.Transparency = 0.45
+	box.Size = size
+	box.Color = if attack_name == "Kick" then Color3.fromRGB(0, 170, 255) else Color3.fromRGB(255, 0, 0)
+	box.Parent = workspace
+
+	local highlight: Highlight = Instance.new("Highlight")
+	highlight.Adornee = box
+	highlight.OutlineColor = Color3.fromRGB(255, 255, 255)
+	highlight.OutlineTransparency = 0
+	highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+	highlight.Parent = box
+
+	local started: number = os.clock()
+
+	while os.clock() - started < duration do
+		if not limb.Parent then
+			break
+		end
+
+		box.CFrame = limb.CFrame
+		RunService.Heartbeat:Wait()
+	end
+
+	box:Destroy()
+end
+
+-- Handling
+
+LocalPlayer.Chatted:Connect(function(message: string)
+	if message == "/hb" then
+		toggle_debug()
+	end
+end)
+
+UserInputService.InputBegan:Connect(function(input: InputObject, processed: boolean)
+	if processed then
+		return
+	end
+
+	if input.KeyCode == Enum.KeyCode.F3 then
+		toggle_debug()
+		return
+	end
+
+	if input.UserInputType == Enum.UserInputType.MouseButton2 then
+		if BlockDown then
+			return
+		end
+
+		BlockDown = true
+		CombatEvent:FireServer("Block", true)
+		return
+	end
+
+	if input.KeyCode == Enum.KeyCode.Q then
+		CombatEvent:FireServer("Parry")
+		return
+	end
+
+	if input.UserInputType ~= Enum.UserInputType.MouseButton1 then
+		return
+	end
+
+	local current_time: number = os.clock()
+	if current_time - LastClick < InputCooldown then
+		return
+	end
+
+	LastClick = current_time
+	CombatEvent:FireServer("Attack")
+end)
+
+UserInputService.InputEnded:Connect(function(input: InputObject, processed: boolean)
+	if processed then
+		return
+	end
+
+	if input.UserInputType ~= Enum.UserInputType.MouseButton2 then
+		return
+	end
+
+	if not BlockDown then
+		return
+	end
+
+	BlockDown = false
+	CombatEvent:FireServer("Block", false)
+end)
+
+CombatEvent.OnClientEvent:Connect(function(kind: string, a: any, b: any, c: any, d: any)
+	if kind ~= "Debug" then
+		return
+	end
+
+	local model: Model = a :: Model
+	local attack_name: string = b :: string
+	local size: Vector3 = c :: Vector3
+	local duration: number = d :: number
+
+	task.spawn(function()
+		show_debug(model, attack_name, size, duration)
+	end)
+end)
+
+HitFeedback.OnClientEvent:Connect(function(kind: string, hrp: BasePart?)
+	if kind == "Hit" then
+		play_sound(hrp, HitSoundId, 1)
+		return
+	end
+
+	if kind == "Block" then
+		play_sound(hrp, BlockSoundId, 0.85)
+		return
+	end
+
+	if kind == "Parry" then
+		play_sound(hrp, ParrySoundId, 1.15)
+	end
+end)
