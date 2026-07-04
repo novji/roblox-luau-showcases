@@ -1,5 +1,5 @@
---!strict
 -- Discord: syruppifying | Roblox: syruppifying
+--!strict
 -- Services
 
 local Players: Players = game:GetService("Players")
@@ -10,6 +10,9 @@ local CollectionService: CollectionService = game:GetService("CollectionService"
 
 -- Variables
 
+-- The client only asks the server to perform combat actions through CombatEvent.
+-- HitFeedback is kept separate because feedback effects are visual only, while
+-- damage, stun, parry, block, and knockback are all decided on the server.
 local Remotes: Folder = ReplicatedStorage:WaitForChild("Remotes") :: Folder
 local CombatEvent: RemoteEvent = Remotes:WaitForChild("CombatEvent") :: RemoteEvent
 local HitFeedback: RemoteEvent = Remotes:WaitForChild("HitFeedback") :: RemoteEvent
@@ -20,6 +23,9 @@ local HitFolder: Folder = AnimRoot:WaitForChild("Hit") :: Folder
 
 -- Constants
 
+-- Combat values are grouped here so the system can be tuned without changing
+-- the attack flow itself. The hitbox size is intentionally close to the R6 limb
+-- size, with padding added later to make fast swings feel consistent.
 local HitboxSize: Vector3 = Vector3.new(1, 2.2, 1)
 local HitboxPadding: Vector3 = Vector3.new(0.25, 0.25, 0.25)
 
@@ -69,6 +75,9 @@ type BlockState = {
 
 -- State
 
+-- Temporary combat state is keyed by either Player or NPC Model.
+-- This allows the same attack, block, parry, stun, and combo functions to work
+-- for both real players and tagged NPCs without duplicating combat logic.
 local Cooldowns: { [Instance]: number } = {}
 local StunnedUntil: { [Instance]: number } = {}
 local Combo: { [Instance]: number } = {}
@@ -90,6 +99,9 @@ local function alive(humanoid: Humanoid?): boolean
 	return humanoid ~= nil and humanoid.Health > 0
 end
 
+-- Animations are loaded and cached per Humanoid.
+-- Roblox animation loading can be expensive if repeated every swing, so each
+-- track is cached by name and reused until the matching Animation object changes.
 local function ensure_animator(humanoid: Humanoid): Animator
 	local animator: Animator? = humanoid:FindFirstChildOfClass("Animator")
 	if animator then
@@ -170,6 +182,9 @@ local function play_anim(humanoid: Humanoid, name: string, animation: Animation?
 	track:Play(0.05, 1, 1)
 end
 
+-- Knockback uses ApplyImpulse on the target root part so the result stays
+-- physics-based instead of teleporting the character. The power is randomized
+-- within a safe range, then clamped so a lucky roll cannot create extreme launches.
 local function apply_knockback(attacker_hrp: BasePart, target_hrp: BasePart, profile: KnockbackProfile)
 	local direction: Vector3 = target_hrp.Position - attacker_hrp.Position
 	if direction.Magnitude <= 0.001 then
@@ -197,6 +212,9 @@ local function apply_knockback(attacker_hrp: BasePart, target_hrp: BasePart, pro
 	target_hrp:ApplyImpulse(impulse)
 end
 
+-- Players and NPCs are represented differently in Roblox.
+-- Player characters are mapped back to the Player object, while NPCs use their
+-- Model. This keeps state cleanup and combat checks consistent for both.
 local function get_subject_from_model(model: Model): Instance
 	local player: Player? = Players:GetPlayerFromCharacter(model)
 	if player then
@@ -206,6 +224,9 @@ local function get_subject_from_model(model: Model): Instance
 	return model
 end
 
+-- This combat example is built around R6.
+-- The attack limbs are read directly from the character model, and the function
+-- fails early if the character is missing required R6 parts or is already dead.
 local function get_rig_parts(model: Model): (Humanoid?, BasePart?, BasePart?, BasePart?, BasePart?)
 	local humanoid: Humanoid? = model:FindFirstChildOfClass("Humanoid")
 	local hrp: BasePart? = model:FindFirstChild("HumanoidRootPart") :: BasePart?
@@ -236,6 +257,8 @@ local function reaction_name_from_attack(attack_name: string): string
 	return "HitKick"
 end
 
+-- Blocking only works when the defender is facing the attacker.
+-- This prevents players from holding block while being protected from every angle.
 local function facing_ok(defender_hrp: BasePart, attacker_hrp: BasePart): boolean
 	local to_attacker: Vector3 = attacker_hrp.Position - defender_hrp.Position
 	if to_attacker.Magnitude <= 0.001 then
@@ -246,6 +269,9 @@ local function facing_ok(defender_hrp: BasePart, attacker_hrp: BasePart): boolea
 	return dot >= DefendFacingDotMin
 end
 
+-- Parry and block are stored separately because they have different rules.
+-- Parry is a short timing window with recovery, while block is a held state that
+-- only works when the defender is facing the attacker.
 local function get_parry_state(subject: Instance): ParryState
 	local parry_state: ParryState? = ParryStates[subject]
 	if parry_state then
@@ -318,6 +344,10 @@ local function set_block(subject: Instance, enabled: boolean)
 	get_block_state(subject).active = enabled
 end
 
+-- Runs the active hitbox window for one attack.
+-- The server checks the attacking limb for a short duration, ignores the attacker,
+-- prevents one swing from hitting the same Humanoid multiple times, and resolves
+-- parry/block before applying damage. This keeps damage server-authoritative.
 local function overlap_hit(
 	attacker_subject: Instance,
 	attacker_char: Model,
@@ -361,6 +391,9 @@ local function overlap_hit(
 
 		local defender_subject: Instance = get_subject_from_model(model)
 
+		-- Defensive checks happen before damage.
+		-- A successful parry stuns the attacker, while a valid block cancels the hit
+		-- only if the defender is facing the attacker.
 		if is_parrying(defender_subject) then
 			clear_parry(defender_subject)
 			stun(attacker_subject, ParryStun)
@@ -405,6 +438,9 @@ local function overlap_hit(
 		local current_cframe: CFrame = limb_part.CFrame
 
 		if UseBlockcastSweep then
+			-- Blockcast sweeps from the previous limb position to the current one.
+			-- This catches fast punches or kicks that could skip over a target between
+			-- Heartbeat frames if only overlap boxes were used.
 			local delta: Vector3 = current_cframe.Position - prev_cframe.Position
 			if delta.Magnitude > 0.001 then
 				local result: RaycastResult? = workspace:Blockcast(prev_cframe, HitboxSize, delta, ray_params)
@@ -419,6 +455,10 @@ local function overlap_hit(
 	end
 end
 
+-- Starts a complete attack from a player or NPC.
+-- The function validates cooldown/stun/parry state, advances the combo counter,
+-- chooses the limb, animation, damage, and knockback profile, then opens the
+-- timed hitbox window in a separate task.
 local function do_attack(attacker_subject: Instance, attacker_char: Model)
 	if now() < (Cooldowns[attacker_subject] or 0) then
 		return
@@ -516,6 +556,9 @@ local function do_attack(attacker_subject: Instance, attacker_char: Model)
 	end)
 end
 
+-- Parry is intentionally short and has recovery.
+-- This makes it timing-based instead of a permanent defensive state, and clearing
+-- block on parry prevents stacking both defenses at the same time.
 local function do_parry(subject: Instance, character: Model)
 	if is_stunned(subject) then
 		clear_parry(subject)
@@ -537,6 +580,8 @@ local function do_parry(subject: Instance, character: Model)
 	play_anim(humanoid, "Parry", parry_anim, Enum.AnimationPriority.Action4)
 end
 
+-- Block is a held defensive state, but it is disabled while stunned.
+-- Starting a block also clears parry so only one defensive mode is active.
 local function do_block(subject: Instance, enabled: boolean)
 	if is_stunned(subject) then
 		set_block(subject, false)
@@ -550,6 +595,9 @@ local function do_block(subject: Instance, enabled: boolean)
 	set_block(subject, enabled)
 end
 
+-- Removes all temporary combat state when a player leaves or an NPC is removed.
+-- Without this cleanup, old Player/Model keys could stay in memory after the
+-- character is gone.
 local function clear_subject(subject: Instance)
 	Cooldowns[subject] = nil
 	StunnedUntil[subject] = nil
@@ -562,6 +610,9 @@ end
 
 -- Handling
 
+-- Clients never send damage numbers or target information.
+-- They only request Attack, Parry, or Block, and the server validates the
+-- character state before running the actual combat logic.
 CombatEvent.OnServerEvent:Connect(function(player: Player, action: string, value: any?)
 	if action == "Attack" then
 		local character: Model? = player.Character
@@ -592,6 +643,10 @@ CollectionService:GetInstanceRemovedSignal(NpcTag):Connect(function(instance: In
 	clear_subject(instance)
 end)
 
+-- NPCs use the same combat functions as players.
+-- Tagged NPCs search for the nearest alive player, move into range, and then
+-- make a simple decision to attack, block, or parry. Reusing the same functions
+-- keeps player combat and NPC combat under the same rules.
 task.spawn(function()
 	while true do
 		task.wait(AiTick)
@@ -622,6 +677,9 @@ task.spawn(function()
 				continue
 			end
 
+			-- The NPC picks the closest alive player inside aggro range.
+			-- This is cheap enough for a small showcase and avoids pathfinding work
+			-- when no valid target is nearby.
 			local best_character: Model? = nil
 			local best_hrp: BasePart? = nil
 			local best_distance: number = AiAggroRange
@@ -691,6 +749,8 @@ task.spawn(function()
 
 			local roll: number = math.random()
 
+			-- NPC defense is probabilistic so it does not feel identical every tick.
+			-- The decision cooldown prevents the AI from rapidly switching states.
 			if roll < AiParryChance then
 				do_parry(npc, npc)
 			elseif roll < AiParryChance + AiBlockChance then
