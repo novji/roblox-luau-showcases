@@ -1,5 +1,5 @@
 --!strict
--- this one needs to include an NPC i am linking the full .rblx file so you can test!
+-- Discord: syruppifying | Roblox: syruppifying
 -- Services
 
 local Players: Players = game:GetService("Players")
